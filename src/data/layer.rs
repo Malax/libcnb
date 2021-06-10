@@ -1,9 +1,8 @@
 use crate::data::defaults;
 use serde::{Deserialize, Serialize};
-use toml::value::Table;
 
 #[derive(Debug, Deserialize, Serialize)]
-pub struct Layer {
+pub struct Layer<M: Default> {
     #[serde(default = "defaults::r#false")]
     pub launch: bool,
     #[serde(default = "defaults::r#false")]
@@ -11,16 +10,16 @@ pub struct Layer {
     #[serde(default = "defaults::r#false")]
     pub cache: bool,
     #[serde(default)]
-    pub metadata: Table,
+    pub metadata: M,
 }
 
-impl Layer {
+impl <M: Default> Layer<M> {
     pub fn new() -> Self {
         Layer {
             launch: false,
             build: false,
             cache: false,
-            metadata: Table::new(),
+            metadata: Default::default()
         }
     }
 
@@ -29,7 +28,7 @@ impl Layer {
         self.launch = false;
         self.build = false;
         self.cache = false;
-        self.metadata.clear();
+        self.metadata = Default::default();
     }
 }
 
@@ -39,7 +38,7 @@ mod tests {
 
     #[test]
     fn metadata_is_optional() {
-        let layer: Result<Layer, toml::de::Error> = toml::from_str(
+        let layer: Result<Layer<Option<String>>, toml::de::Error> = toml::from_str(
             r#"
             launch = true
             build = true

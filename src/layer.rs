@@ -1,24 +1,28 @@
-use crate::{data::layer::Layer as ContentMetadata, Error};
 use std::{
     fs,
     path::{Path, PathBuf},
 };
 
+use serde::{Deserialize, Serialize};
+use serde::de::DeserializeOwned;
+
+use crate::{data::layer::Layer as ContentMetadata, Error};
+
 /// CNB Layer
-pub struct Layer {
+pub struct Layer<M: Default + DeserializeOwned + Serialize> {
     pub name: String,
     path: PathBuf,
     content_metadata_path: PathBuf,
-    content_metadata: ContentMetadata,
+    content_metadata: ContentMetadata<M>,
 }
 
-impl AsRef<Path> for Layer {
+impl<M: Default + DeserializeOwned + Serialize> AsRef<Path> for Layer<M> {
     fn as_ref(&self) -> &Path {
         self.path.as_path()
     }
 }
 
-impl Layer {
+impl<M: Default + DeserializeOwned + Serialize> Layer<M> {
     /// Layer Constructor that makes a ready to go layer:
     /// * create `/<layers_dir>/<layer> if it doesn't exist
     /// * `/<layers_dir>/<layer>.toml` will be read and parsed from disk if found. If not found an
@@ -35,8 +39,9 @@ impl Layer {
     /// use libcnb::layer::Layer;
     ///
     /// # fn main() -> Result<(), libcnb::Error> {
-    /// # let layers_dir = tempdir().unwrap().path().to_owned();
-    /// let layer = Layer::new("foo", layers_dir)?;
+    /// # use toml::value::Table;
+    /// let layers_dir = tempdir().unwrap().path().to_owned();
+    /// let layer = Layer::<Table>::new("foo", layers_dir)?;
     ///
     /// assert!(layer.as_path().exists());
     /// assert_eq!(layer.content_metadata().launch, false);
@@ -77,8 +82,9 @@ impl Layer {
     /// use libcnb::layer::Layer;
     ///
     /// # fn main() -> Result<(), libcnb::Error> {
-    /// # let layers_dir = tempdir().unwrap().path().to_owned();
-    /// let layer = Layer::new_with_content_metadata("foo", &layers_dir, |m| {
+    /// # use toml::value::Table;
+    /// let layers_dir = tempdir().unwrap().path().to_owned();
+    /// let layer = Layer::<Table>::new_with_content_metadata("foo", &layers_dir, |m| {
     ///   m.launch = true;
     ///   m.build = true;
     ///   m.cache = true;
@@ -99,7 +105,7 @@ impl Layer {
     pub fn new_with_content_metadata(
         name: impl Into<String>,
         layers_dir: impl AsRef<Path>,
-        func: impl FnOnce(&mut ContentMetadata),
+        func: impl FnOnce(&mut ContentMetadata<M>),
     ) -> Result<Self, Error> {
         let mut layer = Self::new(name, layers_dir)?;
         layer.write_content_metadata_with_fn(func)?;
@@ -113,21 +119,21 @@ impl Layer {
     }
 
     /// Returns a reference to the [`crate::data::layer::Layer`]
-    pub fn content_metadata(&self) -> &ContentMetadata {
+    pub fn content_metadata(&self) -> &ContentMetadata<M> {
         &self.content_metadata
     }
 
     #[deprecated(
-        since = "0.1.1",
-        note = "Please use content_metadata_mut function intsead"
+    since = "0.1.1",
+    note = "Please use content_metadata_mut function intsead"
     )]
     /// Returns a mutable reference to the [`crate::data::layer::Layer`]
-    pub fn mut_content_metadata(&mut self) -> &mut ContentMetadata {
+    pub fn mut_content_metadata(&mut self) -> &mut ContentMetadata<M> {
         self.content_metadata_mut()
     }
 
     /// Returns a mutable reference to the [`crate::data::layer::Layer`]
-    pub fn content_metadata_mut(&mut self) -> &mut ContentMetadata {
+    pub fn content_metadata_mut(&mut self) -> &mut ContentMetadata<M> {
         &mut self.content_metadata
     }
 
@@ -150,8 +156,9 @@ impl Layer {
     /// use libcnb::layer::Layer;
     ///
     /// # fn main() -> Result<(), libcnb::Error> {
-    /// # let layers_dir = tempdir().unwrap().path().to_owned();
-    /// let mut layer = Layer::new("foo", &layers_dir)?;
+    /// # use toml::value::Table;
+    /// let layers_dir = tempdir().unwrap().path().to_owned();
+    /// let mut layer = Layer::<Table>::new("foo", &layers_dir)?;
     /// layer.write_content_metadata_with_fn(|m| {
     ///   m.launch = true;
     ///   m.build = true;
@@ -172,7 +179,7 @@ impl Layer {
     /// ```
     pub fn write_content_metadata_with_fn(
         &mut self,
-        func: impl FnOnce(&mut ContentMetadata),
+        func: impl FnOnce(&mut ContentMetadata<M>),
     ) -> Result<(), crate::Error> {
         func(self.content_metadata_mut());
         self.write_content_metadata()?;
@@ -183,9 +190,23 @@ impl Layer {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::fs;
+
     use tempfile::tempdir;
+    use toml::value::Table;
+
+    use super::*;
+
+    #[derive(Serialize, Deserialize)]
+    struct CustomMetadataStruct {
+        bar: String,
+    }
+
+    impl Default for CustomMetadataStruct {
+        fn default() -> Self {
+            CustomMetadataStruct { bar: String::from("Default Value") }
+        }
+    }
 
     #[test]
     fn new_reads_layer_toml_metadata() -> Result<(), anyhow::Error> {
@@ -199,17 +220,26 @@ bar = "baz"
 "#,
         )?;
 
-        let layer = Layer::new("foo", &layers_dir)?;
-        assert_eq!(
-            layer
-                .content_metadata()
-                .metadata
-                .get::<str>("bar")
-                .unwrap()
-                .as_str()
-                .unwrap(),
-            "baz"
-        );
+        let layer = Layer::<CustomMetadataStruct>::new("foo", &layers_dir)?;
+        assert_eq!(layer.content_metadata().metadata.bar, "baz");
+
+        Ok(())
+    }
+
+    #[test]
+    fn new_reads_layer_toml_metadata_as_table() -> Result<(), anyhow::Error> {
+        let layers_dir = tempdir()?.path().to_owned();
+        fs::create_dir_all(&layers_dir)?;
+        fs::write(
+            layers_dir.join("foo.toml"),
+            r#"
+[metadata]
+bar = "baz"
+"#,
+        )?;
+
+        let layer = Layer::<Table>::new("foo", &layers_dir)?;
+        assert_eq!(layer.content_metadata().metadata.get("bar").and_then(|x| x.as_str()).unwrap(), "baz");
 
         Ok(())
     }

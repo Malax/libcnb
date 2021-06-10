@@ -6,6 +6,8 @@ use crate::{
     Error,
 };
 use std::{env, fs, path::PathBuf, process};
+use serde::de::DeserializeOwned;
+use serde::Serialize;
 
 pub fn cnb_runtime_build<
     E: std::fmt::Display,
@@ -103,7 +105,7 @@ pub struct BuildContext<P: Platform> {
 
 impl<P: Platform> BuildContext<P> {
     /// Get access to a new or existing layer
-    pub fn layer(&self, name: impl AsRef<str>) -> Result<Layer, Error> {
+    pub fn layer<M: Default + DeserializeOwned + Serialize>(&self, name: impl AsRef<str>) -> Result<Layer<M>, Error> {
         Layer::new(name.as_ref(), self.layers_dir.as_path())
     }
 
