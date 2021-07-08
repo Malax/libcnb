@@ -3,168 +3,89 @@ use std::fs;
 use std::path::Path;
 
 use crate::Env;
+use std::collections::HashMap;
 
 /// Provides access to layer environment variables.
 #[derive(Eq, PartialEq, Debug)]
 pub struct LayerEnv {
-    data: Vec<LayerEnvEntry>,
+    generic: LayerEnvDelta,
+    build: LayerEnvDelta,
+    launch: LayerEnvDelta,
+    process: HashMap<String, LayerEnvDelta>,
+
+    // Entries for the standard layer paths as described in the CNB spec:
+    // https://github.com/buildpacks/spec/blob/a9f64de9c78022aa7a5091077a765f932d7afe42/buildpack.md#layer-paths
+    // These cannot be set by the user itself and are only populated when a `LayerEnv` is read from
+    // disk by this library.
+    layer_paths: LayerEnvDelta,
 }
 
 #[derive(Eq, PartialEq, Debug)]
-struct LayerEnvEntry {
-    r#type: LayerEnvEntryType,
-    name: OsString,
-    value: OsString,
+struct LayerEnvDelta {
+    entries: Vec<LayerEnvDeltaEntry>,
 }
 
-#[derive(Eq, PartialEq, Debug)]
-enum LayerEnvEntryType {
-    Append,
-    Default,
-    Delimiter,
-    Override,
-    Prepend,
-}
-
-impl LayerEnv {
-    pub fn empty() -> Self {
-        LayerEnv { data: vec![] }
+impl LayerEnvDelta {
+    fn empty() -> LayerEnvDelta {
+        LayerEnvDelta { entries: vec![] }
     }
 
-    pub fn apply(&self, environment: &Env) -> Env {
-        let mut environment = environment.clone();
+    fn apply(&self, env: &Env) -> Env {
+        let mut result_env = env.clone();
 
-        for layer_environment_variable_entry in &self.data {
-            match layer_environment_variable_entry.r#type {
-                LayerEnvEntryType::Override => {
-                    environment.insert(
-                        &layer_environment_variable_entry.name,
-                        &layer_environment_variable_entry.value,
-                    );
+        for entry in &self.entries {
+            match entry.r#type {
+                LayerEnvDeltaEntryType::Override => {
+                    result_env.insert(&entry.name, &entry.value);
                 }
-                LayerEnvEntryType::Default => {
-                    if !environment.contains_key(&layer_environment_variable_entry.name) {
-                        environment.insert(
-                            &layer_environment_variable_entry.name,
-                            &layer_environment_variable_entry.value,
-                        );
+                LayerEnvDeltaEntryType::Default => {
+                    if !result_env.contains_key(&entry.name) {
+                        result_env.insert(&entry.name, &entry.value);
                     }
                 }
-                LayerEnvEntryType::Append => {
-                    let mut previous_value = environment
-                        .get(&layer_environment_variable_entry.name)
-                        .unwrap_or(OsString::new());
+                LayerEnvDeltaEntryType::Append => {
+                    let mut previous_value = result_env.get(&entry.name).unwrap_or(OsString::new());
 
                     if previous_value.len() > 0 {
-                        previous_value
-                            .push(self.delimiter_for(&layer_environment_variable_entry.name));
+                        previous_value.push(self.delimiter_for(&entry.name));
                     }
 
-                    previous_value.push(&layer_environment_variable_entry.value);
+                    previous_value.push(&entry.value);
 
-                    environment.insert(&layer_environment_variable_entry.name, previous_value);
+                    result_env.insert(&entry.name, previous_value);
                 }
-                LayerEnvEntryType::Prepend => {
-                    let previous_value = environment
-                        .get(&layer_environment_variable_entry.name)
-                        .unwrap_or(OsString::new());
+                LayerEnvDeltaEntryType::Prepend => {
+                    let previous_value = result_env.get(&entry.name).unwrap_or(OsString::new());
 
                     let mut new_value = OsString::new();
-                    new_value.push(&layer_environment_variable_entry.value);
+                    new_value.push(&entry.value);
 
                     if !previous_value.is_empty() {
-                        new_value.push(self.delimiter_for(&layer_environment_variable_entry.name));
+                        new_value.push(self.delimiter_for(&entry.name));
                         new_value.push(previous_value);
                     }
 
-                    environment.insert(&layer_environment_variable_entry.name, new_value);
+                    result_env.insert(&entry.name, new_value);
                 }
                 _ => (),
             };
         }
 
-        environment
+        result_env
     }
 
-    pub fn insert_override(
-        &mut self,
-        name: impl Into<OsString>,
-        value: impl Into<OsString>,
-    ) -> &Self {
-        self.insert(LayerEnvEntryType::Override, name, value)
-    }
-
-    pub fn insert_append(
-        &mut self,
-        name: impl Into<OsString>,
-        value: impl Into<OsString>,
-    ) -> &Self {
-        self.insert(LayerEnvEntryType::Append, name, value)
-    }
-
-    pub fn insert_prepend(
-        &mut self,
-        name: impl Into<OsString>,
-        value: impl Into<OsString>,
-    ) -> &Self {
-        self.insert(LayerEnvEntryType::Prepend, name, value)
-    }
-
-    pub fn insert_default(
-        &mut self,
-        name: impl Into<OsString>,
-        value: impl Into<OsString>,
-    ) -> &Self {
-        self.insert(LayerEnvEntryType::Default, name, value)
-    }
-
-    pub fn insert_delimiter(
-        &mut self,
-        name: impl Into<OsString>,
-        value: impl Into<OsString>,
-    ) -> &Self {
-        self.insert(LayerEnvEntryType::Delimiter, name, value)
-    }
-
-    fn insert(
-        &mut self,
-        r#type: LayerEnvEntryType,
-        name: impl Into<OsString>,
-        value: impl Into<OsString>,
-    ) -> &Self {
-        let name = name.into();
-        let value = value.into();
-
-        let existing_entry_position = self
-            .data
-            .iter()
-            .position(|entry| entry.name == name && entry.r#type == r#type);
-
-        if let Some(existing_entry_position) = existing_entry_position {
-            self.data.remove(existing_entry_position);
-        }
-
-        self.data.push(LayerEnvEntry {
-            r#type,
-            name,
-            value,
-        });
-
-        self
-    }
-
-    pub(crate) fn delimiter_for(&self, key: impl AsRef<OsStr>) -> OsString {
-        self.data
+    fn delimiter_for(&self, key: impl AsRef<OsStr>) -> OsString {
+        self.entries
             .iter()
             .find(|entry| {
-                entry.name == key.as_ref() && entry.r#type == LayerEnvEntryType::Delimiter
+                entry.name == key.as_ref() && entry.r#type == LayerEnvDeltaEntryType::Delimiter
             })
             .map(|entry| entry.value.clone())
             .unwrap_or(OsString::new())
     }
 
-    pub(crate) fn read_from_env_dir(path: impl AsRef<Path>) -> Result<LayerEnv, std::io::Error> {
-        let mut layer_env = LayerEnv::empty();
+    fn read_from_env_dir(path: impl AsRef<Path>) -> Result<Self, std::io::Error> {
+        let mut layer_env = Self::empty();
 
         for dir_entry in fs::read_dir(path.as_ref())? {
             let path = dir_entry?.path();
@@ -194,14 +115,14 @@ impl LayerEnv {
                     None => {
                         // TODO: This is different for CNB API versions > 0.5:
                         // https://github.com/buildpacks/lifecycle/blob/a7428a55c2a14d8a37e84285b95dc63192e3264e/env/env.go#L66-L71
-                        Some(LayerEnvEntryType::Override)
+                        Some(LayerEnvDeltaEntryType::Override)
                     }
                     Some(file_name_extension) => match file_name_extension.to_str() {
-                        Some("append") => Some(LayerEnvEntryType::Append),
-                        Some("default") => Some(LayerEnvEntryType::Default),
-                        Some("delim") => Some(LayerEnvEntryType::Delimiter),
-                        Some("override") => Some(LayerEnvEntryType::Override),
-                        Some("prepend") => Some(LayerEnvEntryType::Prepend),
+                        Some("append") => Some(LayerEnvDeltaEntryType::Append),
+                        Some("default") => Some(LayerEnvDeltaEntryType::Default),
+                        Some("delim") => Some(LayerEnvDeltaEntryType::Delimiter),
+                        Some("override") => Some(LayerEnvDeltaEntryType::Override),
+                        Some("prepend") => Some(LayerEnvDeltaEntryType::Prepend),
                         // Note: This IS NOT the case where we have no extension. This handles
                         // the case of an unknown or non-UTF-8 extension.
                         Some(_) | None => None,
@@ -216,29 +137,151 @@ impl LayerEnv {
 
         Ok(layer_env)
     }
-}
 
-impl From<Env> for LayerEnv {
-    fn from(env: Env) -> Self {
-        let mut layer_environment_variables = LayerEnv::empty();
+    pub fn insert_override(
+        &mut self,
+        name: impl Into<OsString>,
+        value: impl Into<OsString>,
+    ) -> &Self {
+        self.insert(LayerEnvDeltaEntryType::Override, name, value)
+    }
 
-        for (key, value) in &env {
-            layer_environment_variables
-                .insert_override(key.to_str().unwrap(), value.to_str().unwrap());
+    pub fn insert_append(
+        &mut self,
+        name: impl Into<OsString>,
+        value: impl Into<OsString>,
+    ) -> &Self {
+        self.insert(LayerEnvDeltaEntryType::Append, name, value)
+    }
+
+    pub fn insert_prepend(
+        &mut self,
+        name: impl Into<OsString>,
+        value: impl Into<OsString>,
+    ) -> &Self {
+        self.insert(LayerEnvDeltaEntryType::Prepend, name, value)
+    }
+
+    pub fn insert_default(
+        &mut self,
+        name: impl Into<OsString>,
+        value: impl Into<OsString>,
+    ) -> &Self {
+        self.insert(LayerEnvDeltaEntryType::Default, name, value)
+    }
+
+    pub fn insert_delimiter(
+        &mut self,
+        name: impl Into<OsString>,
+        value: impl Into<OsString>,
+    ) -> &Self {
+        self.insert(LayerEnvDeltaEntryType::Delimiter, name, value)
+    }
+
+    fn insert(
+        &mut self,
+        r#type: LayerEnvDeltaEntryType,
+        name: impl Into<OsString>,
+        value: impl Into<OsString>,
+    ) -> &Self {
+        let name = name.into();
+        let value = value.into();
+
+        let existing_entry_position = self
+            .entries
+            .iter()
+            .position(|entry| entry.name == name && entry.r#type == r#type);
+
+        if let Some(existing_entry_position) = existing_entry_position {
+            self.entries.remove(existing_entry_position);
         }
 
-        layer_environment_variables
+        self.entries.push(LayerEnvDeltaEntry {
+            r#type,
+            name,
+            value,
+        });
+
+        self
     }
 }
 
-impl From<LayerEnv> for Env {
-    fn from(layer_env_vars: LayerEnv) -> Self {
-        layer_env_vars.apply(&Env::empty())
+#[derive(Eq, PartialEq, Debug)]
+struct LayerEnvDeltaEntry {
+    r#type: LayerEnvDeltaEntryType,
+    name: OsString,
+    value: OsString,
+}
+
+#[derive(Eq, PartialEq, Debug)]
+enum LayerEnvDeltaEntryType {
+    Append,
+    Default,
+    Delimiter,
+    Override,
+    Prepend,
+}
+
+impl LayerEnv {
+    pub fn empty() -> Self {
+        LayerEnv {
+            generic: LayerEnvDelta::empty(),
+            build: LayerEnvDelta::empty(),
+            launch: LayerEnvDelta::empty(),
+            process: HashMap::new(),
+            layer_paths: LayerEnvDelta::empty(),
+        }
+    }
+
+    pub fn apply_for_build(&self, env: &Env) -> Env {
+        vec![&self.layer_paths, &self.generic, &self.build]
+            .iter()
+            .fold(env.clone(), |env, delta| delta.apply(&env))
+    }
+
+    pub(crate) fn read_from_layer_dir(path: impl AsRef<Path>) -> Result<LayerEnv, std::io::Error> {
+        let bin_path = path.as_ref().join("bin");
+        let lib_path = path.as_ref().join("lib");
+
+        let mut layer_path_delta = LayerEnvDelta::empty();
+        if bin_path.is_dir() {
+            layer_path_delta.insert_prepend("PATH", &bin_path);
+            layer_path_delta.insert_delimiter("PATH", PATH_LIST_SEPARATOR);
+        }
+
+        if lib_path.is_dir() {
+            layer_path_delta.insert_prepend("LIBRARY_PATH", &lib_path);
+            layer_path_delta.insert_delimiter("LIBRARY_PATH", PATH_LIST_SEPARATOR);
+
+            layer_path_delta.insert_prepend("LD_LIBRARY_PATH", &lib_path);
+            layer_path_delta.insert_delimiter("LD_LIBRARY_PATH", PATH_LIST_SEPARATOR);
+        }
+
+        let mut layer_env = LayerEnv::empty();
+        layer_env.layer_paths = layer_path_delta;
+
+        let env_path = path.as_ref().join("env");
+        if env_path.is_dir() {
+            layer_env.generic = LayerEnvDelta::read_from_env_dir(env_path)?;
+        }
+
+        let env_build_path = path.as_ref().join("env.build");
+        if env_build_path.is_dir() {
+            layer_env.build = LayerEnvDelta::read_from_env_dir(env_build_path)?;
+        }
+
+        let env_launch_path = path.as_ref().join("env.launch");
+        if env_launch_path.is_dir() {
+            layer_env.launch = LayerEnvDelta::read_from_env_dir(env_launch_path)?;
+        }
+
+        Ok(layer_env)
     }
 }
 
 #[cfg(test)]
 mod test {
+    use super::LayerEnvDelta;
     use crate::Env;
     use crate::LayerEnv;
     use std::collections::HashMap;
@@ -286,8 +329,8 @@ mod test {
         original_env.insert("VAR_DEFAULT", "value-default-orig");
         original_env.insert("VAR_OVERRIDE", "value-override-orig");
 
-        let layer_env = LayerEnv::read_from_env_dir(temp_dir.path()).unwrap();
-        let modified_env = layer_env.apply(&original_env);
+        let layer_env_delta = LayerEnvDelta::read_from_env_dir(temp_dir.path()).unwrap();
+        let mut modified_env = layer_env_delta.apply(&original_env);
 
         assert_eq!(
             vec![
@@ -336,8 +379,8 @@ mod test {
         original_env.insert("VAR_NORMAL", "value-normal-orig");
         original_env.insert("VAR_NORMAL_DELIM", "value-normal-delim-orig");
 
-        let layer_env = LayerEnv::read_from_env_dir(temp_dir.path()).unwrap();
-        let modified_env = layer_env.apply(&original_env);
+        let layer_env_delta = LayerEnvDelta::read_from_env_dir(temp_dir.path()).unwrap();
+        let mut modified_env = layer_env_delta.apply(&original_env);
 
         assert_eq!(
             vec![
@@ -345,6 +388,45 @@ mod test {
                 ("VAR_NORMAL_DELIM", "value-normal-delim"),
                 ("VAR_NORMAL_DELIM_NEW", "value-normal-delim"),
                 ("VAR_NORMAL_NEW", "value-normal"),
+            ],
+            environment_as_sorted_vector(&modified_env)
+        );
+    }
+
+    /// Direct port of a test from the reference lifecycle implementation:
+    /// See: https://github.com/buildpacks/lifecycle/blob/a7428a55c2a14d8a37e84285b95dc63192e3264e/env/env_test.go#L55-L80
+    #[test]
+    fn test_reference_impl_add_root_dir_should_append_posix_directories() {
+        let temp_dir = tempdir().unwrap();
+        fs::create_dir_all(temp_dir.path().join("bin")).unwrap();
+        fs::create_dir_all(temp_dir.path().join("lib")).unwrap();
+
+        let mut original_env = Env::empty();
+        original_env.insert("PATH", "some");
+        original_env.insert("LD_LIBRARY_PATH", "some-ld");
+        original_env.insert("LIBRARY_PATH", "some-library");
+
+        let layer_env = LayerEnv::read_from_layer_dir(temp_dir.path()).unwrap();
+        let modified_env = layer_env.apply_for_build(&original_env);
+
+        assert_eq!(
+            vec![
+                (
+                    "LD_LIBRARY_PATH",
+                    format!("{}:some-ld", temp_dir.path().join("lib").to_str().unwrap()).as_str()
+                ),
+                (
+                    "LIBRARY_PATH",
+                    format!(
+                        "{}:some-library",
+                        temp_dir.path().join("lib").to_str().unwrap()
+                    )
+                    .as_str()
+                ),
+                (
+                    "PATH",
+                    format!("{}:some", temp_dir.path().join("bin").to_str().unwrap()).as_str()
+                )
             ],
             environment_as_sorted_vector(&modified_env)
         );
@@ -360,3 +442,9 @@ mod test {
         result
     }
 }
+
+#[cfg(target_family = "unix")]
+const PATH_LIST_SEPARATOR: &str = ":";
+
+#[cfg(target_family = "windows")]
+const PATH_LIST_SEPARATOR: &str = ";";
