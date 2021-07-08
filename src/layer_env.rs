@@ -3,6 +3,7 @@ use std::fs;
 use std::path::Path;
 
 use crate::Env;
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 
 /// Provides access to layer environment variables.
@@ -219,12 +220,10 @@ impl LayerEnv {
             TargetLifecycle::Build => &mut self.build,
             TargetLifecycle::Launch => &mut self.launch,
             TargetLifecycle::Process(process_type_name) => {
-                if !self.process.contains_key(process_type_name.as_str()) {
-                    self.process
-                        .insert(process_type_name.clone(), LayerEnvDelta::empty());
+                match self.process.entry(process_type_name) {
+                    Entry::Occupied(entry) => entry.into_mut(),
+                    Entry::Vacant(entry) => entry.insert(LayerEnvDelta::empty()),
                 }
-
-                self.process.get_mut(process_type_name.as_str()).unwrap()
             }
         };
 
