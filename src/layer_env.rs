@@ -8,7 +8,7 @@ use std::collections::HashMap;
 /// Provides access to layer environment variables.
 #[derive(Eq, PartialEq, Debug)]
 pub struct LayerEnv {
-    generic: LayerEnvDelta,
+    all: LayerEnvDelta,
     build: LayerEnvDelta,
     launch: LayerEnvDelta,
     process: HashMap<String, LayerEnvDelta>,
@@ -34,16 +34,16 @@ impl LayerEnvDelta {
         let mut result_env = env.clone();
 
         for entry in &self.entries {
-            match entry.r#type {
-                LayerEnvDeltaEntryType::Override => {
+            match entry.modification_behavior {
+                ModificationBehavior::Override => {
                     result_env.insert(&entry.name, &entry.value);
                 }
-                LayerEnvDeltaEntryType::Default => {
+                ModificationBehavior::Default => {
                     if !result_env.contains_key(&entry.name) {
                         result_env.insert(&entry.name, &entry.value);
                     }
                 }
-                LayerEnvDeltaEntryType::Append => {
+                ModificationBehavior::Append => {
                     let mut previous_value = result_env.get(&entry.name).unwrap_or(OsString::new());
 
                     if previous_value.len() > 0 {
@@ -54,7 +54,7 @@ impl LayerEnvDelta {
 
                     result_env.insert(&entry.name, previous_value);
                 }
-                LayerEnvDeltaEntryType::Prepend => {
+                ModificationBehavior::Prepend => {
                     let previous_value = result_env.get(&entry.name).unwrap_or(OsString::new());
 
                     let mut new_value = OsString::new();
@@ -78,7 +78,8 @@ impl LayerEnvDelta {
         self.entries
             .iter()
             .find(|entry| {
-                entry.name == key.as_ref() && entry.r#type == LayerEnvDeltaEntryType::Delimiter
+                entry.name == key.as_ref()
+                    && entry.modification_behavior == ModificationBehavior::Delimiter
             })
             .map(|entry| entry.value.clone())
             .unwrap_or(OsString::new())
@@ -115,14 +116,14 @@ impl LayerEnvDelta {
                     None => {
                         // TODO: This is different for CNB API versions > 0.5:
                         // https://github.com/buildpacks/lifecycle/blob/a7428a55c2a14d8a37e84285b95dc63192e3264e/env/env.go#L66-L71
-                        Some(LayerEnvDeltaEntryType::Override)
+                        Some(ModificationBehavior::Override)
                     }
                     Some(file_name_extension) => match file_name_extension.to_str() {
-                        Some("append") => Some(LayerEnvDeltaEntryType::Append),
-                        Some("default") => Some(LayerEnvDeltaEntryType::Default),
-                        Some("delim") => Some(LayerEnvDeltaEntryType::Delimiter),
-                        Some("override") => Some(LayerEnvDeltaEntryType::Override),
-                        Some("prepend") => Some(LayerEnvDeltaEntryType::Prepend),
+                        Some("append") => Some(ModificationBehavior::Append),
+                        Some("default") => Some(ModificationBehavior::Default),
+                        Some("delim") => Some(ModificationBehavior::Delimiter),
+                        Some("override") => Some(ModificationBehavior::Override),
+                        Some("prepend") => Some(ModificationBehavior::Prepend),
                         // Note: This IS NOT the case where we have no extension. This handles
                         // the case of an unknown or non-UTF-8 extension.
                         Some(_) | None => None,
@@ -138,66 +139,25 @@ impl LayerEnvDelta {
         Ok(layer_env)
     }
 
-    pub fn insert_override(
-        &mut self,
-        name: impl Into<OsString>,
-        value: impl Into<OsString>,
-    ) -> &Self {
-        self.insert(LayerEnvDeltaEntryType::Override, name, value)
-    }
-
-    pub fn insert_append(
-        &mut self,
-        name: impl Into<OsString>,
-        value: impl Into<OsString>,
-    ) -> &Self {
-        self.insert(LayerEnvDeltaEntryType::Append, name, value)
-    }
-
-    pub fn insert_prepend(
-        &mut self,
-        name: impl Into<OsString>,
-        value: impl Into<OsString>,
-    ) -> &Self {
-        self.insert(LayerEnvDeltaEntryType::Prepend, name, value)
-    }
-
-    pub fn insert_default(
-        &mut self,
-        name: impl Into<OsString>,
-        value: impl Into<OsString>,
-    ) -> &Self {
-        self.insert(LayerEnvDeltaEntryType::Default, name, value)
-    }
-
-    pub fn insert_delimiter(
-        &mut self,
-        name: impl Into<OsString>,
-        value: impl Into<OsString>,
-    ) -> &Self {
-        self.insert(LayerEnvDeltaEntryType::Delimiter, name, value)
-    }
-
     fn insert(
         &mut self,
-        r#type: LayerEnvDeltaEntryType,
+        modification_behavior: ModificationBehavior,
         name: impl Into<OsString>,
         value: impl Into<OsString>,
     ) -> &Self {
         let name = name.into();
         let value = value.into();
 
-        let existing_entry_position = self
-            .entries
-            .iter()
-            .position(|entry| entry.name == name && entry.r#type == r#type);
+        let existing_entry_position = self.entries.iter().position(|entry| {
+            entry.name == name && entry.modification_behavior == modification_behavior
+        });
 
         if let Some(existing_entry_position) = existing_entry_position {
             self.entries.remove(existing_entry_position);
         }
 
         self.entries.push(LayerEnvDeltaEntry {
-            r#type,
+            modification_behavior,
             name,
             value,
         });
@@ -208,13 +168,13 @@ impl LayerEnvDelta {
 
 #[derive(Eq, PartialEq, Debug)]
 struct LayerEnvDeltaEntry {
-    r#type: LayerEnvDeltaEntryType,
+    modification_behavior: ModificationBehavior,
     name: OsString,
     value: OsString,
 }
 
 #[derive(Eq, PartialEq, Debug)]
-enum LayerEnvDeltaEntryType {
+pub enum ModificationBehavior {
     Append,
     Default,
     Delimiter,
@@ -222,10 +182,18 @@ enum LayerEnvDeltaEntryType {
     Prepend,
 }
 
+#[derive(Eq, PartialEq, Debug)]
+pub enum TargetLifecycle {
+    All,
+    Build,
+    Launch,
+    Process(String),
+}
+
 impl LayerEnv {
     pub fn empty() -> Self {
         LayerEnv {
-            generic: LayerEnvDelta::empty(),
+            all: LayerEnvDelta::empty(),
             build: LayerEnvDelta::empty(),
             launch: LayerEnvDelta::empty(),
             process: HashMap::new(),
@@ -234,9 +202,33 @@ impl LayerEnv {
     }
 
     pub fn apply_for_build(&self, env: &Env) -> Env {
-        vec![&self.layer_paths, &self.generic, &self.build]
+        vec![&self.layer_paths, &self.all, &self.build]
             .iter()
             .fold(env.clone(), |env, delta| delta.apply(&env))
+    }
+
+    pub fn insert(
+        &mut self,
+        target: TargetLifecycle,
+        modification_behavior: ModificationBehavior,
+        name: impl Into<OsString>,
+        value: impl Into<OsString>,
+    ) {
+        let target_delta = match target {
+            TargetLifecycle::All => &mut self.all,
+            TargetLifecycle::Build => &mut self.build,
+            TargetLifecycle::Launch => &mut self.launch,
+            TargetLifecycle::Process(process_type_name) => {
+                if !self.process.contains_key(process_type_name.as_str()) {
+                    self.process
+                        .insert(process_type_name.clone(), LayerEnvDelta::empty());
+                }
+
+                self.process.get_mut(process_type_name.as_str()).unwrap()
+            }
+        };
+
+        target_delta.insert(modification_behavior, name, value);
     }
 
     pub(crate) fn read_from_layer_dir(path: impl AsRef<Path>) -> Result<LayerEnv, std::io::Error> {
@@ -245,16 +237,24 @@ impl LayerEnv {
 
         let mut layer_path_delta = LayerEnvDelta::empty();
         if bin_path.is_dir() {
-            layer_path_delta.insert_prepend("PATH", &bin_path);
-            layer_path_delta.insert_delimiter("PATH", PATH_LIST_SEPARATOR);
+            layer_path_delta.insert(ModificationBehavior::Prepend, "PATH", &bin_path);
+            layer_path_delta.insert(ModificationBehavior::Delimiter, "PATH", PATH_LIST_SEPARATOR);
         }
 
         if lib_path.is_dir() {
-            layer_path_delta.insert_prepend("LIBRARY_PATH", &lib_path);
-            layer_path_delta.insert_delimiter("LIBRARY_PATH", PATH_LIST_SEPARATOR);
+            layer_path_delta.insert(ModificationBehavior::Prepend, "LIBRARY_PATH", &lib_path);
+            layer_path_delta.insert(
+                ModificationBehavior::Delimiter,
+                "LIBRARY_PATH",
+                PATH_LIST_SEPARATOR,
+            );
 
-            layer_path_delta.insert_prepend("LD_LIBRARY_PATH", &lib_path);
-            layer_path_delta.insert_delimiter("LD_LIBRARY_PATH", PATH_LIST_SEPARATOR);
+            layer_path_delta.insert(ModificationBehavior::Prepend, "LD_LIBRARY_PATH", &lib_path);
+            layer_path_delta.insert(
+                ModificationBehavior::Delimiter,
+                "LD_LIBRARY_PATH",
+                PATH_LIST_SEPARATOR,
+            );
         }
 
         let mut layer_env = LayerEnv::empty();
@@ -262,7 +262,7 @@ impl LayerEnv {
 
         let env_path = path.as_ref().join("env");
         if env_path.is_dir() {
-            layer_env.generic = LayerEnvDelta::read_from_env_dir(env_path)?;
+            layer_env.all = LayerEnvDelta::read_from_env_dir(env_path)?;
         }
 
         let env_build_path = path.as_ref().join("env.build");
@@ -282,8 +282,7 @@ impl LayerEnv {
 #[cfg(test)]
 mod test {
     use super::LayerEnvDelta;
-    use crate::Env;
-    use crate::LayerEnv;
+    use crate::layer_env::{Env, LayerEnv, ModificationBehavior, TargetLifecycle};
     use std::collections::HashMap;
     use std::fs;
     use tempfile::tempdir;
@@ -330,7 +329,7 @@ mod test {
         original_env.insert("VAR_OVERRIDE", "value-override-orig");
 
         let layer_env_delta = LayerEnvDelta::read_from_env_dir(temp_dir.path()).unwrap();
-        let mut modified_env = layer_env_delta.apply(&original_env);
+        let modified_env = layer_env_delta.apply(&original_env);
 
         assert_eq!(
             vec![
@@ -380,7 +379,7 @@ mod test {
         original_env.insert("VAR_NORMAL_DELIM", "value-normal-delim-orig");
 
         let layer_env_delta = LayerEnvDelta::read_from_env_dir(temp_dir.path()).unwrap();
-        let mut modified_env = layer_env_delta.apply(&original_env);
+        let modified_env = layer_env_delta.apply(&original_env);
 
         assert_eq!(
             vec![
@@ -429,6 +428,47 @@ mod test {
                 )
             ],
             environment_as_sorted_vector(&modified_env)
+        );
+    }
+
+    #[test]
+    fn test_layer_env_insert() {
+        let mut layer_env = LayerEnv::empty();
+        layer_env.insert(
+            TargetLifecycle::Build,
+            ModificationBehavior::Append,
+            "MAVEN_OPTS",
+            "-Dskip.tests=true",
+        );
+
+        layer_env.insert(
+            TargetLifecycle::All,
+            ModificationBehavior::Override,
+            "JAVA_TOOL_OPTIONS",
+            "-Xmx1G",
+        );
+
+        layer_env.insert(
+            TargetLifecycle::Build,
+            ModificationBehavior::Override,
+            "JAVA_TOOL_OPTIONS",
+            "-Xmx2G",
+        );
+
+        layer_env.insert(
+            TargetLifecycle::Launch,
+            ModificationBehavior::Append,
+            "JAVA_TOOL_OPTIONS",
+            "-XX:+UseSerialGC",
+        );
+
+        let result_env = layer_env.apply_for_build(&Env::empty());
+        assert_eq!(
+            vec![
+                ("JAVA_TOOL_OPTIONS", "-Xmx2G"),
+                ("MAVEN_OPTS", "-Dskip.tests=true")
+            ],
+            environment_as_sorted_vector(&result_env)
         );
     }
 
