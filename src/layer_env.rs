@@ -140,6 +140,31 @@ impl LayerEnvDelta {
         Ok(layer_env)
     }
 
+    fn write_to_env_dir(&self, path: impl AsRef<Path>) -> Result<(), std::io::Error> {
+        fs::remove_dir_all(path.as_ref())?;
+        fs::create_dir_all(path.as_ref())?;
+
+        for entry in &self.entries {
+            let file_extension = match entry.modification_behavior {
+                ModificationBehavior::Append => ".append",
+                ModificationBehavior::Default => ".default",
+                ModificationBehavior::Delimiter => ".delimiter",
+                ModificationBehavior::Override => ".override",
+                ModificationBehavior::Prepend => ".prepend",
+            };
+
+            let mut file_name = entry.name.clone();
+            file_name.push(file_extension);
+
+            let file_path = path.as_ref().join(file_name);
+
+            use std::os::unix::ffi::OsStrExt;
+            fs::write(file_path, &entry.value.as_bytes())?;
+        }
+
+        Ok(())
+    }
+
     fn insert(
         &mut self,
         modification_behavior: ModificationBehavior,
@@ -428,6 +453,20 @@ mod test {
             ],
             environment_as_sorted_vector(&modified_env)
         );
+    }
+
+    #[test]
+    fn test_layer_env_delta_fs_read_write() {
+        let mut original_delta = LayerEnvDelta::empty();
+        original_delta.insert(ModificationBehavior::Default, "FOO", "BAR");
+        original_delta.insert(ModificationBehavior::Append, "APPEND_TO_ME", "NEW_VALUE");
+
+        let temp_dir = tempdir().unwrap();
+
+        original_delta.write_to_env_dir(&temp_dir.path()).unwrap();
+        let disk_delta = LayerEnvDelta::read_from_env_dir(&temp_dir.path()).unwrap();
+
+        assert_eq!(original_delta, disk_delta);
     }
 
     #[test]
